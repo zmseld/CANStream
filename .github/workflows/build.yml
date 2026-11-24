@@ -1,0 +1,199 @@
+name: Build CANStream
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      build_configuration:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      create_release:
+        description: 'Publish GitHub Release (if on tag or manual release)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Package (${{ github.event.inputs.build_configuration || 'Release' }})
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout CANStream
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout Ctrl_GraphWindow Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: WhileNotInfinite/Ctrl_GraphWindow
+          path: external/Ctrl_GraphWindow
+
+      - name: Link Ctrl_GraphWindow Dependency
+        shell: pwsh
+        run: |
+          $target = "$env:GITHUB_WORKSPACE\external\Ctrl_GraphWindow"
+          $parentDir = (Get-Item "$env:GITHUB_WORKSPACE").Parent.FullName
+          $linkPath = Join-Path -Path $parentDir -ChildPath "Ctrl_GraphWindow"
+          
+          Write-Host "Creating NTFS junction from '$linkPath' to '$target'..."
+          cmd /c mklink /J "$linkPath" "$target"
+          
+          $expectedProj = Join-Path -Path $linkPath -ChildPath "Ctrl_GraphWindow\Ctrl_GraphWindow.csproj"
+          if (!(Test-Path $expectedProj)) {
+            throw "Expected project not found at: $expectedProj"
+          }
+          Write-Host "Ctrl_GraphWindow project successfully verified at: $expectedProj"
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Restore NuGet & Assembly References
+        shell: pwsh
+        run: |
+          Write-Host "Installing Microsoft.Office.Interop.Excel package..."
+          $packagesDir = "$env:GITHUB_WORKSPACE\packages"
+          nuget install Microsoft.Office.Interop.Excel -Version 15.0.4795.1001 -OutputDirectory $packagesDir
+          
+          $interopDir = "$packagesDir\Microsoft.Office.Interop.Excel.15.0.4795.1001\lib\net20"
+          $interopDll = "$interopDir\Microsoft.Office.Interop.Excel.dll"
+          
+          if (!(Test-Path $interopDll)) {
+            throw "Microsoft.Office.Interop.Excel.dll not found at: $interopDll"
+          }
+          Write-Host "Located Interop assembly at: $interopDll"
+
+          # Provide assembly at the hardcoded HintPath in CANStream.csproj as fallback
+          $vincentDir = "C:\Users\Vincent\Documents\Visual Studio 2013\Outils\Controls"
+          New-Item -ItemType Directory -Force -Path $vincentDir | Out-Null
+          Copy-Item -Path $interopDll -Destination "$vincentDir\Microsoft.Office.Interop.Excel.dll" -Force
+          Write-Host "Copied fallback reference to: $vincentDir\Microsoft.Office.Interop.Excel.dll"
+
+          # Export reference directory for MSBuild ResolveAssemblyReferences
+          "INTEROP_REF_PATH=$interopDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "Installing Inno Setup via Chocolatey..."
+          choco install innosetup -y --no-progress
+          $isccDirs = @(
+            "C:\Program Files (x86)\Inno Setup 6",
+            "C:\Program Files (x86)\Inno Setup 5",
+            "C:\Program Files\Inno Setup 6",
+            "C:\Program Files\Inno Setup 5"
+          )
+          foreach ($dir in $isccDirs) {
+            if (Test-Path "$dir\iscc.exe") {
+              Write-Host "Found ISCC at: $dir"
+              $dir | Out-File -FilePath $env:GITHUB_PATH -Append
+              break
+            }
+          }
+
+      - name: Build Solution with MSBuild
+        shell: pwsh
+        run: |
+          $config = "${{ github.event.inputs.build_configuration }}"
+          if ([string]::IsNullOrWhiteSpace($config)) { $config = "Release" }
+
+          Write-Host "Building CANStream.sln (Configuration: $config, Platform: Any CPU)..."
+          msbuild CANStream.sln `
+            /p:Configuration=$config `
+            /p:Platform="Any CPU" `
+            /p:ReferencePath="$env:INTEROP_REF_PATH" `
+            /v:minimal `
+            /m
+
+          $mainExe = "CANStream\bin\$config\CANStream.exe"
+          if (!(Test-Path $mainExe)) {
+            throw "Build output not found at: $mainExe"
+          }
+          Write-Host "Build completed successfully. Main executable: $mainExe"
+
+      - name: Build Inno Setup Installers
+        shell: pwsh
+        run: |
+          $config = "${{ github.event.inputs.build_configuration }}"
+          if ([string]::IsNullOrWhiteSpace($config)) { $config = "Release" }
+
+          if ($config -ne "Release") {
+            Write-Host "Skipping installer compilation for $config build (installers require Release outputs)."
+            return
+          }
+
+          cd Installer
+          if (Test-Path "bin\Release") {
+            Remove-Item -Recurse -Force "bin\Release"
+          }
+
+          Write-Host "Compiling x64 installer..."
+          iscc "CANStream_OpenSource_Setup.iss"
+
+          Write-Host "Compiling Win32 installer..."
+          iscc /dWIN32 "CANStream_OpenSource_Setup.iss"
+
+          $installers = Get-ChildItem -Path "bin\Release" -Filter "*.exe"
+          if ($installers.Count -lt 2) {
+            throw "Expected 2 installers in Installer\bin\Release, found $($installers.Count)"
+          }
+          Write-Host "Generated installers:"
+          $installers | ForEach-Object { Write-Host " - $($_.Name) ($($_.Length) bytes)" }
+
+      - name: Create Portable Zip Package
+        shell: pwsh
+        run: |
+          $config = "${{ github.event.inputs.build_configuration }}"
+          if ([string]::IsNullOrWhiteSpace($config)) { $config = "Release" }
+
+          $sourceDir = "CANStream\bin\$config"
+          $zipName = "CANStream_${config}_Portable.zip"
+
+          Write-Host "Creating portable ZIP archive '$zipName' from '$sourceDir'..."
+          Compress-Archive -Path "$sourceDir\*" -DestinationPath $zipName -Force
+          Write-Host "Created $zipName ($( (Get-Item $zipName).Length ) bytes)"
+
+      - name: Upload Installers
+        if: github.event.inputs.build_configuration == 'Release' || github.event.inputs.build_configuration == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: CANStream-Installers
+          path: Installer/bin/Release/*.exe
+          if-no-files-found: warn
+
+      - name: Upload Portable Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: CANStream-Portable-${{ github.event.inputs.build_configuration || 'Release' }}
+          path: CANStream_*_Portable.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Installer/bin/Release/*.exe
+            CANStream_*_Portable.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true

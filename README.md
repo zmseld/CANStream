@@ -29,3 +29,18 @@ If so, please visit http://www.microsoft.com/net to download the latest version 
 
 ## Home page
 Visit http://canstream.hebergratuit.net/wp/ for more information and details about CANStream
+
+## Build & Continuous Integration
+
+This project uses **GitHub Actions** for continuous integration and automated builds:
+
+* **Workflow**: Located at `.github/workflows/build.yml`.
+* **Triggers**:
+  * Pushes and pull requests to `master`.
+  * Git release tags (`v*`).
+  * Manual execution (`workflow_dispatch`) with selectable `Release` or `Debug` configuration.
+* **Build Artifacts**:
+  * **CANStream-Installers**: Both 64-bit (`CANStream_Setup_x64.exe`) and 32-bit (`CANStream_Setup_Win32.exe`) Inno Setup installers.
+  * **CANStream-Portable**: Standalone portable archive containing all binaries, libraries (`Ciloci.Flee.dll`, `Ctrl_GraphWindow.dll`), and user documentation.
+* **Automated Releases**: Pushing a tag like `v2.3.2` automatically creates a GitHub Release and attaches the compiled installers and portable package.
+
