@@ -70,8 +70,35 @@ jobs:
       - name: Restore NuGet & Assembly References
         shell: pwsh
         run: |
-          Write-Host "Installing Microsoft.Office.Interop.Excel package..."
           $packagesDir = "$env:GITHUB_WORKSPACE\packages"
+          New-Item -ItemType Directory -Force -Path $packagesDir | Out-Null
+
+          # 1. Install .NET Framework 4.5 Reference Assemblies
+          Write-Host "Installing Microsoft.NETFramework.ReferenceAssemblies.net45..."
+          nuget install Microsoft.NETFramework.ReferenceAssemblies.net45 -Version 1.0.3 -OutputDirectory $packagesDir
+          
+          $refSource = "$packagesDir\Microsoft.NETFramework.ReferenceAssemblies.net45.1.0.3\build\.NETFramework\v4.5"
+          if (!(Test-Path "$refSource\mscorlib.dll")) {
+            throw ".NET Framework 4.5 reference assemblies not found at: $refSource"
+          }
+
+          $destDirs = @(
+            "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.5",
+            "C:\Program Files\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.5"
+          )
+          foreach ($dest in $destDirs) {
+            Write-Host "Deploying targeting pack to: $dest"
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item -Path "$refSource\*" -Destination $dest -Recurse -Force
+          }
+
+          # Register SKU entries in registry
+          New-Item -Path "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319\SKUs\.NETFramework,Version=v4.5" -Force -ErrorAction SilentlyContinue | Out-Null
+          New-Item -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319\SKUs\.NETFramework,Version=v4.5" -Force -ErrorAction SilentlyContinue | Out-Null
+          Write-Host "Targeting pack for .NET Framework 4.5 successfully configured."
+
+          # 2. Install Microsoft.Office.Interop.Excel
+          Write-Host "Installing Microsoft.Office.Interop.Excel package..."
           nuget install Microsoft.Office.Interop.Excel -Version 15.0.4795.1001 -OutputDirectory $packagesDir
           
           $interopDir = "$packagesDir\Microsoft.Office.Interop.Excel.15.0.4795.1001\lib\net20"
